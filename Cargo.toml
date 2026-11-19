@@ -1,0 +1,24 @@
+[package]
+name = "mbx"
+version = "0.6.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["plugin"]
+plugin = ["toybox/gpui-vst3", "dep:tempfile", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:raw-window-handle"]
+
+[dependencies]
+crossbeam-queue = "0.3"
+toybox = { git = "https://github.com/PORTALSURFER/toybox.git", rev = "db656f567fb3c9e7ce3f1b1acd07a77ce7206170", default-features = false }
+rustfft = "6.4"
+tempfile = { version = "3.27", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.5", optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSScreen", "NSView", "NSWindow"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSString", "NSValue"], optional = true }
+raw-window-handle = { version = "0.6.2", optional = true }
