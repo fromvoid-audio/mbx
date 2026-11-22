@@ -1,5 +1,7 @@
 # MBX
 
+[![Support me on Ko-fi](https://img.shields.io/badge/Support%20me%20on%20Ko--fi-72a4f2?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/F7X2225YCF)
+
 MBX is a Toybox multiband dynamics plug-in for Apple Silicon macOS. New instances start with three non-overlapping bands split at 120 Hz and 3 kHz. Split bands to work with up to six. Each band offers downward and upward compression and expansion, a soft knee and gain range, attack and release, makeup gain, stereo linking, mid or side processing, and an internal, custom-frequency, or external detector. The native editor shows input, output, and external sidechain spectra, per-band gain, and output peak meters. The VST3 supports mono and stereo, 32-bit and 64-bit audio, host automation, and project recall.
 
 The default preset starts with neutral thresholds. Hover at a frequency and click **+** to split its band. **Split band** in the band list splits the selected band at its logarithmic midpoint. The new band inherits the original dynamics settings. Drag a shared crossover to move both edges, and scroll over an edge to change its slope. **Remove** merges the selected region into an adjoining band. Bypassing a band preserves its range and settings.
