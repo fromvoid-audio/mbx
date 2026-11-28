@@ -1,0 +1,77 @@
+# release.toml — declarative release configuration for `ship`
+#
+# Quick usage:
+#   ship                                      # dry-run next patch release
+#   ship v0.6.0                               # dry-run explicit version/tag
+#   ship -x                                   # bump patch, test, build, sign, notarize, tag, push, GitHub Release
+#   ship --local -x                           # build, sign & notarize local .dmg + .zip into [dist].dir
+
+[project]
+name = "mbx"
+tag_prefix = "v"
+
+[version]
+source = "cargo"
+path = "Cargo.toml"
+
+[dist]
+dir = "dist"
+per_version_dir = true
+
+[checks]
+commands = [
+  ["cargo", "fmt", "--all", "--", "--check"],
+  ["cargo", "clippy", "--locked", "--release", "--all-targets", "--", "-D", "warnings"],
+  ["cargo", "test", "--locked", "--release", "--lib"],
+]
+
+[build]
+commands = [
+  ["cargo", "build", "--locked", "--release"],
+]
+
+[macos.bundle]
+name = "MBX.vst3"
+binary = "target/release/libmbx.dylib"
+executable_name = "MBX"
+bundle_id = "audio.fromvoid.mbx.vst3"
+display_name = "MBX"
+package_type = "BNDL"
+pkg_info = "BNDL????"
+dmg_symlink_name = "VST3"
+dmg_symlink_target = "/Library/Audio/Plug-Ins/VST3"
+
+[macos.signing]
+enabled = true
+# Public certificate SHA-1 selector for macOS Keychain (never a secret).
+# Overridable via SHIP_SIGNING_IDENTITY or gitignored .ship.local.toml.
+identity = "4EDF56A7ADD0B4786C2EEE23A50D61620BCE7E4E"
+identity_env = "SHIP_SIGNING_IDENTITY"
+team_id = "DKTKQ8U5T8"
+hardened_runtime = true
+timestamp = true
+# Uses macOS Keychain profile for Apple notarization and stapling.
+notarize = true
+notary_profile = "capture-release"
+notary_profile_env = "SHIP_NOTARY_PROFILE"
+
+[package]
+formats = ["dmg", "zip"]
+name_template = "{name}-{version}-{os}-{arch}"
+dmg_volume_name = "MBX {version}"
+checksums = true
+
+[git]
+require_clean = true
+branch = "main"
+commit_message = "release: {tag}"
+tag_message = "Release {tag}"
+push = true
+remote = "origin"
+
+[github]
+enabled = true
+repo = "fromvoid-audio/mbx"
+title = "MBX {tag}"
+draft = false
+generate_notes = true
