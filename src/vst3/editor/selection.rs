@@ -146,23 +146,66 @@ pub fn range_band(id: usize) -> Option<usize> {
     (0..BANDS).find(|&band| id == P::Range.id(band))
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ModeAxis {
+    Family,
+    Direction,
+}
+
+impl ModeAxis {
+    // The VST3 Mode choices are Compress Down, Compress Up, Expand Down, Expand Up.
+    fn mask(self) -> u8 {
+        match self {
+            Self::Family => 2,
+            Self::Direction => 1,
+        }
+    }
+
+    pub fn active(self, values: &Values, band: usize) -> bool {
+        let id = P::Mode.id(band);
+        parameters::spec(id).plain(values[id]) as u8 & self.mask() != 0
+    }
+
+    fn value(self, values: &Values, id: usize, second: bool) -> f64 {
+        let spec = parameters::spec(id);
+        let mode = spec.plain(values[id]) as u8;
+        let mask = self.mask();
+        spec.normalized(f64::from((mode & !mask) | (u8::from(second) * mask)))
+    }
+
+    pub fn edits(
+        self,
+        values: &Values,
+        bands: BandSet,
+        second: bool,
+    ) -> impl Iterator<Item = (usize, f64)> + '_ {
+        members(bands).map(move |band| {
+            let id = P::Mode.id(band);
+            (id, self.value(values, id, second))
+        })
+    }
+}
+
 pub fn range_db(values: &Values, band: usize) -> f64 {
     let id = P::Range.id(band);
-    parameters::spec(id).plain(values[id]) * f64::from(super::plot::range_direction(values, band))
+    let direction = if ModeAxis::Direction.active(values, band) {
+        1.0
+    } else {
+        -1.0
+    };
+    parameters::spec(id).plain(values[id]) * direction
 }
 
 pub fn range_edits(values: &Values, band: usize, db: f64) -> [(usize, f64); 2] {
     let range = P::Range.id(band);
     let mode = P::Mode.id(band);
-    let spec = parameters::spec(mode);
-    let original = spec.plain(values[mode]) as usize;
-    let direction = if db == 0.0 {
-        original % 2
+    let up = if db == 0.0 {
+        ModeAxis::Direction.active(values, band)
     } else {
-        usize::from(db > 0.0)
+        db > 0.0
     };
     [
-        (mode, spec.normalized((original / 2 * 2 + direction) as f64)),
+        (mode, ModeAxis::Direction.value(values, mode, up)),
         (range, parameters::spec(range).normalized(db.abs())),
     ]
 }
@@ -208,5 +251,26 @@ mod tests {
         }
         assert_eq!(spec.plain(values[mode]), 3.0);
         assert_eq!(range_db(&values, band), 5.0);
+    }
+
+    #[test]
+    fn direct_mode_choices_preserve_the_other_axis_on_each_selected_band() {
+        let mut values = parameters::defaults();
+        let bands = one(0) | one(1) | one(2) | one(4);
+        let ids = [0, 1, 2, 4].map(|band| P::Mode.id(band));
+        for (plain, id) in ids.into_iter().enumerate() {
+            values[id] = parameters::spec(id).normalized(plain as f64);
+        }
+        for (axis, second, expected) in [
+            (ModeAxis::Family, false, [0.0, 1.0, 0.0, 1.0]),
+            (ModeAxis::Family, true, [2.0, 3.0, 2.0, 3.0]),
+            (ModeAxis::Direction, false, [0.0, 0.0, 2.0, 2.0]),
+            (ModeAxis::Direction, true, [1.0, 1.0, 3.0, 3.0]),
+        ] {
+            assert!(axis
+                .edits(&values, bands, second)
+                .map(|(id, value)| { (id, parameters::spec(id).plain(value)) })
+                .eq(ids.into_iter().zip(expected)));
+        }
     }
 }

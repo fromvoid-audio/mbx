@@ -7,28 +7,14 @@ use toybox::gpui::{
     Point, Styled, Window,
 };
 
-#[derive(Clone, Copy)]
-pub(super) enum Style {
-    Main,
-    Small,
-}
-
-pub(super) fn dial(style: Style, value: f32, neutral: f32, detector: Option<f32>) -> AnyElement {
-    let diameter = match style {
-        Style::Main => 40.0,
-        Style::Small => 20.0,
-    };
+pub(super) fn dial(value: f32, neutral: f32, detector: Option<f32>) -> AnyElement {
+    let diameter = 54.0;
     canvas(
         |_, _, _| (),
         move |bounds, (), window, _| {
             let center = bounds.center();
             let radius = diameter / 2.0;
-            let face = radius
-                - if matches!(style, Style::Main) {
-                    6.0
-                } else {
-                    5.0
-                };
+            let face = radius - 7.0;
             window.paint_quad(
                 fill(
                     Bounds::new(

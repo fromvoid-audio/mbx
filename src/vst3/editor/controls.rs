@@ -1,5 +1,6 @@
 use super::{
-    finish, plot, with_group_edit, EditIds, Editor, Handler, ACCENT, HAIR, MUTED, PAPER, TEXT,
+    finish, plot, with_group_edit, EditIds, Editor, Handler, ACCENT, BAR_CONTROL_HEIGHT, HAIR,
+    MUTED, PAPER, TEXT,
 };
 use crate::parameters::{self, layout::Layout, BandParam as P, Values, BANDS, PHASE};
 use crate::vst3::Parameters;
@@ -161,7 +162,9 @@ impl Editor {
                 .bg(rgb(if option == linear { 0x3b2827 } else { PAPER }))
                 .cursor_pointer()
                 .px(px(6.0))
-                .py(px(3.0))
+                .h(px(BAR_CONTROL_HEIGHT))
+                .flex()
+                .items_center()
                 .text_size(px(11.0))
                 .child(if option { "Linear" } else { "Minimum" })
                 .on_mouse_down(
@@ -194,8 +197,9 @@ impl Editor {
         };
         div()
             .flex()
-            .flex_col()
-            .gap(px(3.0))
+            .flex_none()
+            .items_center()
+            .gap(px(4.0))
             .child(
                 div()
                     .text_size(px(11.0))

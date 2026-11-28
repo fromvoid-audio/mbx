@@ -1,4 +1,7 @@
-use super::{mark_dirty, Editor, ACCENT, HAIR, MUTED, PAPER, TEXT};
+use super::{
+    mark_dirty, Editor, ACCENT, HAIR, HEADER_GAP, HEADER_HEIGHT, HEADER_PADDING, MUTED, PAPER,
+    TEXT, TITLE_WIDTH,
+};
 use crate::{
     parameters::{layout::Layout, Values},
     vst3::{
@@ -489,8 +492,8 @@ impl Editor {
             .id("presets-popup")
             .track_focus(&focus)
             .absolute()
-            .left(px(98.0))
-            .top(px(43.0))
+            .left(px(HEADER_PADDING + TITLE_WIDTH + HEADER_GAP))
+            .top(px(HEADER_HEIGHT - 2.0))
             .w(px(332.0))
             .p(px(6.0))
             .flex()

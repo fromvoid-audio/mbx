@@ -9,8 +9,8 @@ use crate::{
 };
 use toybox::gpui::{self, fill, point, px, rgb, size, Bounds, PathBuilder, Pixels, Point, Window};
 
-pub const FOOT: f32 = 90.0;
-pub const LANE: f32 = 11.0;
+// Leave room below the frequency ruler for the detector grips.
+pub const FOOT: f32 = 24.0;
 pub const PAD: f32 = 34.0;
 pub const GRID_INSET: f32 = 17.0;
 pub const FREQUENCIES: [f64; 10] = [
@@ -106,18 +106,12 @@ pub(super) fn x(bounds: Bounds<Pixels>, view: Viewport, normalized: f64) -> Pixe
     bounds.left() + px(PAD) + (bounds.size.width - px(PAD * 2.0)) * view.position(normalized) as f32
 }
 
-fn rect(window: &mut Window, x: Pixels, y: Pixels, w: Pixels, h: Pixels, color: u32) {
-    window.paint_quad(fill(Bounds::new(point(x, y), size(w, h)), rgb(color)));
+pub(super) fn spectrum_y(bounds: Bounds<Pixels>, db: f32) -> Pixels {
+    bounds.top() + px(16.0 + (-db.clamp(-90.0, 0.0) / 90.0) * (ruler(bounds) - 30.0))
 }
 
-pub fn range_direction(values: &Values, band: usize) -> f32 {
-    let id = P::Mode.id(band);
-    let mode = parameters::spec(id).plain(values[id]) as u8;
-    if mode.is_multiple_of(2) {
-        -1.0
-    } else {
-        1.0
-    }
+fn rect(window: &mut Window, x: Pixels, y: Pixels, w: Pixels, h: Pixels, color: u32) {
+    window.paint_quad(fill(Bounds::new(point(x, y), size(w, h)), rgb(color)));
 }
 
 struct Region {
@@ -407,8 +401,7 @@ fn curve(
         let i = (point_index as usize).min(POINTS - 1);
         let db =
             trace[i] + (trace[(i + 1).min(POINTS - 1)] - trace[i]) * point_index.fract() as f32;
-        let y = bounds.top() + px(16.0 + (-db.clamp(-90.0, 0.0) / 90.0) * (ruler(bounds) - 30.0));
-        let p = point(x(bounds, view, frequency), y);
+        let p = point(x(bounds, view, frequency), spectrum_y(bounds, db));
         if index == 0 {
             path.move_to(p);
         } else {
@@ -550,48 +543,6 @@ pub fn draw(window: &mut Window, bounds: Bounds<Pixels>, display: Display<'_>) {
         px(1.0),
         grid,
     );
-    for (lane, &band) in layout.order().iter().enumerate() {
-        let color = if selection & selection::one(band) != 0 {
-            ACCENT
-        } else {
-            0xa4a4a4
-        };
-        let [low, high] = layout.edges[band].map(|value| x(bounds, view, value));
-        if high < bounds.left() + px(PAD) || low > bounds.right() - px(PAD) {
-            continue;
-        }
-        let low = low.max(bounds.left() + px(PAD));
-        let high = high.min(bounds.right() - px(PAD));
-        let enabled = values[P::Enabled.id(band)] > 0.5;
-        let row = top + px(ruler(bounds) + 10.0 + LANE * lane as f32);
-        let line = if enabled { color } else { 0x515151 };
-        let edge = if Some(band) == selected { color } else { line };
-        rect(
-            window,
-            left + px(PAD),
-            row + px(2.0),
-            width - px(PAD * 2.0),
-            px(1.0),
-            0x2b2b2b,
-        );
-        rect(
-            window,
-            low,
-            row + px(1.0),
-            (high - low).max(px(1.0)),
-            px(3.0),
-            line,
-        );
-        rect(window, low - px(1.0), row - px(1.0), px(3.0), px(7.0), edge);
-        rect(
-            window,
-            high - px(1.0),
-            row - px(1.0),
-            px(3.0),
-            px(7.0),
-            edge,
-        );
-    }
     for edge in selected
         .into_iter()
         .flat_map(|band| edges(values, band))

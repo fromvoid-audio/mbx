@@ -1,6 +1,7 @@
 mod browser;
 mod controls;
 mod entry;
+mod icon;
 mod journal;
 mod key;
 mod knob;
@@ -10,6 +11,7 @@ mod plot;
 mod response;
 mod selection;
 mod size_controls;
+mod threshold;
 
 use selection::{members, one, BandSet};
 
@@ -50,8 +52,23 @@ const RAIL: u32 = 0x101010;
 const RAIL_TEXT: u32 = TEXT;
 const RAIL_MUTED: u32 = MUTED;
 const ACCENT: u32 = plot::ACCENT;
+const HEADER_HEIGHT: f32 = 32.0;
+const HEADER_PADDING: f32 = 12.0;
+const HEADER_GAP: f32 = 8.0;
+const TITLE_WIDTH: f32 = 41.0;
+const FOOTER_HEIGHT: f32 = 30.0;
+const BAR_CONTROL_HEIGHT: f32 = 24.0;
+const VERTICAL_DRAG_PIXELS: f32 = 150.0;
 
 type EditIds = RefCell<Vec<usize>>;
+
+#[derive(Clone, Copy)]
+enum ValueStyle {
+    Footer,
+    Knob,
+    Compact,
+    Threshold(threshold::Marker, threshold::DetectorReading),
+}
 
 #[derive(Clone, Copy)]
 enum Command {
@@ -85,6 +102,7 @@ enum Drag {
     Vertical {
         start: Pixels,
         value: f64,
+        drag_pixels: f32,
         boundary: Option<Boundary>,
     },
     Detector {
@@ -100,7 +118,6 @@ enum Drag {
     Center {
         start: Point<Pixels>,
         group: BandSet,
-        allow_gain: bool,
         axis: Option<Axis>,
     },
     Range {
@@ -152,6 +169,8 @@ struct Editor {
     entry: Option<entry::Entry>,
     plot: Rc<Cell<Option<Bounds<Pixels>>>>,
     chart_focus: FocusHandle,
+    threshold_focus: FocusHandle,
+    threshold_marker: Option<threshold::Marker>,
     focus: [FocusHandle; COUNT],
     band_focus: [FocusHandle; BANDS],
     trace_focus: [FocusHandle; TRACES + 1],
@@ -160,6 +179,8 @@ struct Editor {
     browser: browser::Browser,
     preset_focus: [FocusHandle; 7],
     graph_focus: [FocusHandle; 5],
+    inspector_switch_focus: [FocusHandle; 4],
+    mode_focus: [[FocusHandle; 2]; 2],
     press: Rc<controls::PressSlot>,
     journals: [RefCell<journal::Journal>; 2],
     editing: Rc<EditIds>,
@@ -447,7 +468,7 @@ impl Editor {
         }
     }
 
-    fn begin_number(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn prepare_number(&mut self, id: usize) {
         let values = self.params.values();
         let plain = if let Some(band) = selection::range_band(id) {
             selection::range_db(&values, band)
@@ -456,6 +477,10 @@ impl Editor {
             parameters::spec(id).plain(normalized)
         };
         self.entry = Some(entry::Entry::new(id, plain));
+    }
+
+    fn begin_number(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.prepare_number(id);
         window.focus(&self.focus[id], cx);
         cx.notify();
     }
@@ -483,6 +508,10 @@ impl Editor {
     fn detector_range(&self, values: &Values) -> Option<key::Range> {
         (self.detector_open && self.selection != 0 && parameters::present(values, self.selected))
             .then(|| key::Range::read(values, self.selected))
+    }
+
+    fn detector_level(&self, band: usize) -> f32 {
+        f32::from_bits(self.meters.detector[band].load(Relaxed))
     }
 
     fn start_range(&mut self, band: usize, start: Pixels, db_per_pixel: f64) {
@@ -640,18 +669,22 @@ impl Editor {
 
     fn move_drag(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let bounds = self.plot.get();
-        let over_panel = bounds
-            .zip(self.panel)
-            .is_some_and(|(bounds, panel)| panel.contains(bounds, event.position));
+        let over_controls = bounds.is_some_and(|bounds| {
+            self.panel
+                .is_some_and(|panel| panel.contains(bounds, event.position))
+                || self.threshold_marker.is_some_and(|marker| {
+                    marker.grip.contains(&event.position) || marker.hits_line(event.position)
+                })
+        });
         let hover = bounds
             .filter(|bounds| {
-                !over_panel
+                !over_controls
                     && bounds.contains(&event.position)
                     && f32::from(event.position.y - bounds.top()) < plot::ruler(*bounds) - 15.0
             })
             .map(|bounds| plot::at_x(bounds, self.viewport, event.position.x));
         let hovered = bounds.and_then(|bounds| {
-            if over_panel || !bounds.contains(&event.position) {
+            if over_controls || !bounds.contains(&event.position) {
                 return None;
             }
             let values = self.params.values();
@@ -721,10 +754,12 @@ impl Editor {
             Drag::Vertical {
                 start,
                 value,
+                drag_pixels,
                 boundary,
             } => {
                 let distance = f64::from(f32::from(start - event.position.y));
-                let delta = (value + distance * fine / 150.0).clamp(0.0, 1.0) - value;
+                let delta =
+                    (value + distance * fine / f64::from(drag_pixels)).clamp(0.0, 1.0) - value;
                 if let Some(boundary) = boundary {
                     for (id, value) in boundary.edits(value + delta) {
                         self.change(id, value);
@@ -771,12 +806,7 @@ impl Editor {
                     self.change(id, value);
                 }
             }
-            Drag::Center {
-                start,
-                group,
-                allow_gain,
-                axis,
-            } => {
+            Drag::Center { start, group, axis } => {
                 let Some(bounds) = bounds else { return };
                 let dx = f32::from(event.position.x - start.x);
                 let dy = f32::from(start.y - event.position.y);
@@ -789,16 +819,11 @@ impl Editor {
                         Some(Axis::Gain)
                     }
                 });
-                self.drag = Some(Drag::Center {
-                    start,
-                    group,
-                    allow_gain,
-                    axis,
-                });
+                self.drag = Some(Drag::Center { start, group, axis });
                 let delta = (plot::at_x(bounds, self.viewport, event.position.x)
                     - plot::at_x(bounds, self.viewport, start.x))
                     * fine;
-                if event.modifiers.platform && allow_gain {
+                if event.modifiers.platform {
                     let layout = Layout::new(&self.drag_initial);
                     let [left, right] =
                         [0, 1].map(|side| layout.boundary(&self.drag_initial, self.selected, side));
@@ -823,7 +848,7 @@ impl Editor {
                             }
                         }
                     }
-                    if allow_gain && (axis == Some(Axis::Gain) || event.modifiers.alt) {
+                    if axis == Some(Axis::Gain) || event.modifiers.alt {
                         for band in members(group) {
                             let gain = P::Makeup.id(band);
                             self.change(
@@ -961,38 +986,27 @@ impl Editor {
             cx.notify();
             return;
         }
+        if y >= ruler - 14.0 {
+            return;
+        }
         let x = plot::at_x(bounds, self.viewport, event.position.x);
-        let mut hit = if y < ruler {
-            plot::hit(
-                bounds,
-                self.chart_view(&values),
-                &values,
-                self.selected,
-                event.position,
-            )
-        } else {
-            let row = y - (ruler + 6.0);
-            if row < 0.0 {
-                return;
-            }
-            let layout = Layout::new(&values);
-            let Some(&band) = layout.order().get((row / plot::LANE) as usize) else {
-                return;
-            };
-            let [low, high] = layout.edges[band];
-            let near = 7.0 / f64::from(f32::from(bounds.size.width) - plot::PAD * 2.0)
-                * (self.viewport.frequency(1.0) - self.viewport.frequency(0.0));
-            match ((x - low).abs(), (x - high).abs()) {
-                (a, b) if a <= near && a <= b => Some(plot::Hit::Edge(band, 0)),
-                (_, b) if b <= near => Some(plot::Hit::Edge(band, 1)),
-                _ if (low..=high).contains(&x) => Some(plot::Hit::Center(band)),
-                _ => Some(plot::Hit::Body(band)),
-            }
-        };
+        let mut hit = plot::hit(
+            bounds,
+            self.chart_view(&values),
+            &values,
+            self.selected,
+            event.position,
+        );
+        if let Some(marker) = self.threshold_marker.filter(|marker| {
+            matches!(hit, None | Some(plot::Hit::Body(_))) && marker.hits_line(event.position)
+        }) {
+            self.threshold_down(marker, event, window, cx);
+            return;
+        }
         let empty = selection::present(&values) == 0;
         let mut created = false;
         let add = y <= 29.0 && self.hover.is_some() && hit.is_none();
-        if (add || (hit.is_none() && (event.click_count == 2 || empty))) && y < ruler - 14.0 {
+        if add || (hit.is_none() && (event.click_count == 2 || empty)) {
             if let Some(band) = self.create_band(x) {
                 values = self.params.values();
                 hit = Some(plot::Hit::Center(band));
@@ -1000,14 +1014,12 @@ impl Editor {
             }
         }
         let Some(hit) = hit else {
-            if y < ruler - 14.0 {
-                self.selection = 0;
-                self.drag = Some(Drag::Marquee {
-                    start: event.position,
-                    end: event.position,
-                });
-                cx.notify();
-            }
+            self.selection = 0;
+            self.drag = Some(Drag::Marquee {
+                start: event.position,
+                end: event.position,
+            });
+            cx.notify();
             return;
         };
         let band = hit.band();
@@ -1046,7 +1058,6 @@ impl Editor {
                 }
             }
             plot::Hit::Center(_) => {
-                let allow_gain = y < ruler;
                 self.drag_db_pixels = self.chart_view(&values).db_pixels(bounds);
                 self.drag_gain_db = self.gain_display(&values);
                 self.drag_initial = values;
@@ -1055,17 +1066,12 @@ impl Editor {
                     self.drag_edges
                         .iter()
                         .flat_map(|edge| edge.ids.into_iter().flatten())
-                        .chain(
-                            members(self.selection)
-                                .filter(|_| allow_gain)
-                                .map(|band| P::Makeup.id(band)),
-                        ),
+                        .chain(members(self.selection).map(|band| P::Makeup.id(band))),
                 );
                 self.drag = Some(Drag::Center {
                     start: event.position,
                     group: self.selection,
-                    allow_gain,
-                    axis: (!allow_gain).then_some(Axis::Frequency),
+                    axis: None,
                 });
             }
             plot::Hit::Range(_) => {
@@ -1176,18 +1182,73 @@ impl Editor {
         cx.notify();
     }
 
-    fn number(&self, id: usize, cx: &mut Context<Self>) -> AnyElement {
-        self.value(id, None, cx)
+    fn footer_value(&self, id: usize, cx: &mut Context<Self>) -> AnyElement {
+        self.value(id, ValueStyle::Footer, cx)
     }
 
-    fn value(&self, id: usize, dial: Option<knob::Style>, cx: &mut Context<Self>) -> AnyElement {
-        let compact = dial.is_some();
+    fn start_vertical(&mut self, id: usize, value: f64, start: Pixels, drag_pixels: f32) {
+        self.drag_initial = self.params.values();
+        self.drag_gain_db = self.gain_display(&self.drag_initial);
+        let boundary = self.boundary(id);
+        if let Some(edge) = boundary {
+            if !edge.movable() {
+                return;
+            }
+            self.begin(edge.ids.into_iter().flatten());
+        } else {
+            self.begin(self.control_ids(id));
+        }
+        self.drag = Some(Drag::Vertical {
+            start,
+            value,
+            drag_pixels,
+            boundary,
+        });
+    }
+
+    fn threshold_down(
+        &mut self,
+        marker: threshold::Marker,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = P::Threshold.id(self.selected);
+        window.focus(&self.threshold_focus, cx);
+        self.entry = None;
+        if event.modifiers.alt {
+            self.reset_control(id);
+        } else if event.click_count == 2 {
+            self.prepare_number(id);
+        } else {
+            self.start_vertical(
+                id,
+                self.params.get(id),
+                event.position.y,
+                marker.drag_pixels,
+            );
+        }
+        cx.notify();
+    }
+
+    fn value(&self, id: usize, style: ValueStyle, cx: &mut Context<Self>) -> AnyElement {
+        let compact = !matches!(style, ValueStyle::Footer);
+        let threshold = match style {
+            ValueStyle::Threshold(marker, detector) => Some((marker, detector)),
+            _ => None,
+        };
+        let marker = threshold.map(|(marker, _)| marker);
         let spec = parameters::spec(id);
         let values = self.params.values();
         let value = self.control_value(&values, id);
         let source = (compact && P::Key.id(self.selected) == id)
             .then(|| Source::read(&values, self.selected));
-        let focus = self.focus[id].clone();
+        let focus = if marker.is_some() {
+            &self.threshold_focus
+        } else {
+            &self.focus[id]
+        }
+        .clone();
         let discrete = !spec.choices.is_empty();
         let entry = self.entry.as_ref().filter(|entry| entry.id == id);
         let signed =
@@ -1204,13 +1265,23 @@ impl Editor {
         );
         let key_meter = (0..BANDS)
             .find(|&band| P::Threshold.id(band) == id)
-            .map(|band| {
-                let value = f32::from_bits(self.meters.detector[band].load(Relaxed));
-                ((value + 72.0) / 72.0).clamp(0.0, 1.0)
-            });
-        let border = entry.map_or(HAIR, |_| ACCENT);
+            .map(|band| spec.normalized(f64::from(self.detector_level(band))) as f32);
+        let border = if entry.is_some() {
+            ACCENT
+        } else if compact {
+            BG
+        } else {
+            HAIR
+        };
         let interactive = div()
-            .id(("param", id))
+            .id((
+                if marker.is_some() {
+                    "threshold-marker"
+                } else {
+                    "param"
+                },
+                id,
+            ))
             .track_focus(&focus)
             .tab_stop(true)
             .flex_1()
@@ -1220,15 +1291,19 @@ impl Editor {
             .border_color(rgb(border))
             .focus(|style| style.border_color(rgb(ACCENT)))
             .hover(|style| style.bg(rgb(0x292929)))
-            .bg(rgb(PAPER))
+            .bg(rgb(if compact { BG } else { PAPER }))
             .cursor_pointer()
-            .px(px(if compact { 4.0 } else { 10.0 }))
-            .py(px(if compact { 2.0 } else { 7.0 }))
+            .px(px(if compact { 4.0 } else { 6.0 }))
+            .py(px(if compact { 2.0 } else { 0.0 }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if compact {
                         cx.stop_propagation();
+                    }
+                    if let Some(marker) = marker {
+                        this.threshold_down(marker, event, window, cx);
+                        return;
                     }
                     window.focus(&focus, cx);
                     this.entry = None;
@@ -1237,56 +1312,55 @@ impl Editor {
                     } else if discrete {
                         this.control_step(id, if event.modifiers.shift { -1 } else { 1 }, false);
                     } else if event.click_count == 2 {
-                        this.begin_number(id, window, cx);
+                        this.prepare_number(id);
                     } else if let Some(edge) = key::edge_for_id(&this.params.values(), id) {
                         this.start_detector(event.position, edge, false);
                     } else if let Some(band) = selection::range_band(id) {
                         this.start_range(band, event.position.y, 0.24);
                     } else {
-                        this.drag_initial = this.params.values();
-                        this.drag_gain_db = this.gain_display(&this.drag_initial);
-                        let boundary = this.boundary(id);
-                        if let Some(edge) = boundary {
-                            if !edge.movable() {
-                                return;
-                            }
-                            this.begin(edge.ids.into_iter().flatten());
-                        } else {
-                            this.begin(this.control_ids(id));
-                        }
-                        this.drag = Some(Drag::Vertical {
-                            start: event.position.y,
-                            value,
-                            boundary,
-                        });
+                        this.start_vertical(id, value, event.position.y, VERTICAL_DRAG_PIXELS);
                     }
                     cx.notify();
                 }),
             )
-            .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                    if this.entry_key(id, &event.keystroke, cx) {
-                        return;
-                    }
-                    match event.keystroke.key.as_str() {
-                        "enter" | "f2" if !discrete => this.begin_number(id, window, cx),
-                        "up" | "right" => this.control_step(id, 1, event.keystroke.modifiers.shift),
-                        "down" | "left" => {
-                            this.control_step(id, -1, event.keystroke.modifiers.shift)
-                        }
-                        "home" if !discrete => this.reset_control(id),
-                        "enter" | "space" if discrete => this.control_step(id, 1, false),
-                        _ => return,
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            );
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if this.entry_key(id, &event.keystroke, cx) {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "enter" | "f2" if !discrete => this.prepare_number(id),
+                    "up" | "right" => this.control_step(id, 1, event.keystroke.modifiers.shift),
+                    "down" | "left" => this.control_step(id, -1, event.keystroke.modifiers.shift),
+                    "home" if !discrete => this.reset_control(id),
+                    "enter" | "space" if discrete => this.control_step(id, 1, false),
+                    _ => return,
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }));
+        if let Some((marker, detector)) = threshold {
+            let mut slider = interactive;
+            for (action, direction) in [
+                (gpui::AccessibleAction::Increment, 1),
+                (gpui::AccessibleAction::Decrement, -1),
+            ] {
+                let editor = cx.entity().downgrade();
+                slider = slider.on_a11y_action(action, move |_, _, cx| {
+                    editor
+                        .update(cx, |this, cx| {
+                            this.control_step(id, direction, false);
+                            cx.notify();
+                        })
+                        .ok();
+                });
+            }
+            return marker.control(slider, spec, value, entry, display, detector);
+        }
         let label = div()
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(if compact { 10.0 } else { 11.0 }))
-            .line_height(px(if compact { 13.0 } else { 19.0 }))
+            .text_size(px(10.0))
+            .line_height(px(13.0))
             .text_color(rgb(MUTED))
             .child(if source.is_some() {
                 "Source"
@@ -1296,25 +1370,24 @@ impl Editor {
         let readout = div()
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(if compact || spec.choices.len() > 2 {
-                12.0
+            .text_size(px(if matches!(style, ValueStyle::Knob) {
+                13.0
             } else {
-                14.0
+                11.0
             }))
-            .line_height(px(if compact { 15.0 } else { 21.0 }))
+            .line_height(px(16.0))
             .text_color(rgb(if entry.is_some_and(|entry| entry.invalid) {
                 ACCENT
             } else {
                 TEXT
             }))
             .child(display);
-        if let Some(style) = dial {
-            if discrete {
+        if compact {
+            if matches!(style, ValueStyle::Compact) {
                 return interactive
                     .flex()
                     .flex_col()
                     .justify_center()
-                    .items_center()
                     .child(label)
                     .child(readout)
                     .into_any_element();
@@ -1325,39 +1398,24 @@ impl Editor {
                 0.0
             };
             let position = signed.map_or(value as f32, knob::signed_position);
-            let dial = knob::dial(style, position, zero, key_meter);
-            return match style {
-                knob::Style::Main => interactive
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .child(dial)
-                    .child(div().text_center().child(label).child(readout))
-                    .into_any_element(),
-                knob::Style::Small => interactive
-                    .relative()
-                    .child(div().pr(px(19.0)).child(label))
-                    .child(div().mt(px(3.0)).child(readout))
-                    .child(div().absolute().right(px(3.0)).top(px(2.0)).child(dial))
-                    .into_any_element(),
-            };
+            return interactive
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(2.0))
+                .child(knob::dial(position, zero, key_meter))
+                .child(div().text_center().child(label).child(readout))
+                .into_any_element();
         }
-        let interactive = interactive.child(label).child(readout);
-        if discrete {
-            interactive.child(div().h(px(4.0))).into_any_element()
-        } else {
-            interactive
-                .child(
-                    div()
-                        .mt(px(4.0))
-                        .h(px(2.0))
-                        .rounded(px(1.0))
-                        .bg(rgb(HAIR))
-                        .child(div().h_full().w(relative(value as f32)).bg(rgb(ACCENT))),
-                )
-                .into_any_element()
-        }
+        interactive
+            .h(px(BAR_CONTROL_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(label.flex_none())
+            .child(readout.flex_1().min_w_0().text_right())
+            .into_any_element()
     }
 
     fn band_button(
@@ -1382,7 +1440,7 @@ impl Editor {
         let focus = graph
             .map_or(&self.focus[id], |index| &self.graph_focus[index])
             .clone();
-        div()
+        let button = div()
             .id((
                 if graph.is_some() {
                     "graph-switch"
@@ -1391,8 +1449,6 @@ impl Editor {
                 },
                 id,
             ))
-            .track_focus(&focus)
-            .tab_stop(true)
             .rounded(px(4.0))
             .border_1()
             .border_color(rgb(if active { accent } else { HAIR }))
@@ -1403,7 +1459,20 @@ impl Editor {
             .text_color(rgb(if active { 0x101010 } else { RAIL_MUTED }))
             .px(px(if graph.is_some() { 4.0 } else { 7.0 }))
             .py(px(if graph.is_some() { 0.0 } else { 2.0 }))
-            .child(name)
+            .child(name);
+        self.switch_control(id, focus, button, cx)
+    }
+
+    fn switch_control(
+        &self,
+        id: usize,
+        focus: FocusHandle,
+        button: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        button
+            .track_focus(&focus)
+            .tab_stop(true)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1604,22 +1673,27 @@ impl Editor {
             _ => true,
         };
         let focus = self.command_focus[command as usize].clone();
-        div()
-            .id(label)
+        let button = match command {
+            Command::Remove => icon::Icon::Remove.button(label, false),
+            Command::Deselect => icon::Icon::Close.button(label, false),
+            _ => div()
+                .id(label)
+                .focus(|style| style.border_color(rgb(ACCENT)))
+                .border_1()
+                .border_color(rgb(HAIR))
+                .rounded(px(4.0))
+                .bg(rgb(PAPER))
+                .hover(|style| style.bg(rgb(0x393939)))
+                .text_color(rgb(if enabled { TEXT } else { 0x777777 }))
+                .text_size(px(11.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .cursor_pointer()
+                .child(label),
+        };
+        button
             .track_focus(&focus)
             .tab_stop(enabled)
-            .focus(|style| style.border_color(rgb(ACCENT)))
-            .border_1()
-            .border_color(rgb(HAIR))
-            .rounded(px(4.0))
-            .bg(rgb(PAPER))
-            .hover(|style| style.bg(rgb(0x393939)))
-            .text_color(rgb(if enabled { TEXT } else { 0x777777 }))
-            .text_size(px(11.0))
-            .px(px(8.0))
-            .py(px(3.0))
-            .cursor_pointer()
-            .child(label)
             .on_click(cx.listener(move |this, _, window, cx| {
                 if enabled {
                     window.focus(&focus, cx);
@@ -1708,7 +1782,32 @@ impl Render for Editor {
         if selected.is_none() {
             self.panel = None;
         }
-        let guidance = if detector.is_some() {
+        let threshold = selected.and_then(|band| {
+            let chart = self.plot.get()?;
+            let id = P::Threshold.id(band);
+            let marker = threshold::Marker::new(
+                chart,
+                view,
+                layout.edges[band],
+                parameters::spec(id),
+                values[id],
+                self.panel?.bounds(chart),
+            )?;
+            let detector = threshold::DetectorReading::new(
+                self.detector_level(band),
+                activity[band],
+                values[P::Enabled.id(band)] > 0.5 && values[BYPASS] <= 0.5,
+            );
+            Some((id, marker, detector))
+        });
+        self.threshold_marker = threshold.map(|(_, marker, _)| marker);
+        let threshold_focused = self.threshold_focus.is_focused(window);
+        let threshold_control = threshold.map(|(id, marker, detector)| {
+            self.value(id, ValueStyle::Threshold(marker, detector), cx)
+        });
+        let guidance = if threshold_focused {
+            "Drag the threshold line or handle · Shift for fine adjustment · Enter to type"
+        } else if detector.is_some() {
             "Drag the KEY grips to set the detector range · Shift for fine adjustment · K audition"
         } else if self.chart_focus.is_focused(window) {
             "←/→ select  ·  Enter split  ·  D detector  ·  S solo  ·  M mute  ·  0 reset zoom"
@@ -1758,19 +1857,20 @@ impl Render for Editor {
             )
             .child(
                 div()
-                    .h(px(51.0))
+                    .h(px(HEADER_HEIGHT))
                     .flex_none()
                     .bg(rgb(PAPER))
-                    .px(px(18.0))
+                    .px(px(HEADER_PADDING))
                     .border_b_1()
                     .border_color(rgb(HAIR))
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap(px(HEADER_GAP))
                     .child(
                         div()
-                            .w(px(68.0))
-                            .text_size(px(24.0))
+                            .w(px(TITLE_WIDTH))
+                            .flex_none()
+                            .text_size(px(17.0))
                             .font_weight(gpui::FontWeight::BOLD)
                             .child("MBX"),
                     )
@@ -1824,11 +1924,11 @@ impl Render for Editor {
                             .flex_1()
                             .min_w_0()
                             .px(px(18.0))
-                            .pt(px(12.0))
-                            .pb(px(10.0))
+                            .pt(px(6.0))
+                            .pb(px(5.0))
                             .flex()
                             .flex_col()
-                            .gap(px(7.0))
+                            .gap(px(4.0))
                             .child(
                                 div()
                                     .flex()
@@ -1860,6 +1960,9 @@ impl Render for Editor {
                                             )
                                             .on_scroll_wheel(cx.listener(Self::chart_scroll))
                                             .child(spectrum)
+                                            .children(threshold.map(|(_, marker, detector)| {
+                                                marker.line(threshold_focused, detector)
+                                            }))
                                             .child(
                                                 div()
                                                     .absolute()
@@ -1950,6 +2053,10 @@ impl Render for Editor {
                                                     .text_color(rgb(MUTED))
                                                     .child("KEY")
                                             }))
+                                            .children(threshold_control)
+                                            .children(threshold.map(|(_, marker, detector)| {
+                                                marker.detector_dot(detector)
+                                            }))
                                             .children(inspector),
                                     )
                                     .child(self.output_meter(cx)),
@@ -1958,6 +2065,7 @@ impl Render for Editor {
                                 div()
                                     .pl(px(4.0))
                                     .text_size(px(11.0))
+                                    .line_height(px(14.0))
                                     .text_color(rgb(MUTED))
                                     .child(guidance),
                             ),
@@ -1965,20 +2073,20 @@ impl Render for Editor {
             )
             .child(
                 div()
-                    .h(px(70.0))
+                    .h(px(FOOTER_HEIGHT))
                     .flex_none()
                     .bg(rgb(PAPER))
-                    .px(px(18.0))
+                    .px(px(12.0))
                     .border_t_1()
                     .border_color(rgb(HAIR))
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(6.0))
                     .child(self.phase_selector(cx))
-                    .child(div().w(px(126.0)).child(self.number(LOOKAHEAD, cx)))
-                    .child(div().w(px(68.0)).child(self.number(BYPASS, cx)))
-                    .child(div().w(px(74.0)).child(self.number(MIX, cx)))
-                    .child(div().w(px(82.0)).child(self.number(OUTPUT, cx)))
+                    .child(div().w(px(144.0)).child(self.footer_value(LOOKAHEAD, cx)))
+                    .child(div().w(px(81.0)).child(self.footer_value(BYPASS, cx)))
+                    .child(div().w(px(86.0)).child(self.footer_value(MIX, cx)))
+                    .child(div().w(px(110.0)).child(self.footer_value(OUTPUT, cx)))
                     .child(div().flex_1())
                     .child(self.trace_switch(0, "Pre", cx))
                     .child(self.trace_switch(1, "Post", cx))
@@ -2086,6 +2194,8 @@ pub fn new(
                     entry: None,
                     plot: Rc::new(Cell::new(None)),
                     chart_focus: cx.focus_handle(),
+                    threshold_focus: cx.focus_handle(),
+                    threshold_marker: None,
                     focus: std::array::from_fn(|_| cx.focus_handle()),
                     band_focus: std::array::from_fn(|_| cx.focus_handle()),
                     trace_focus: std::array::from_fn(|_| cx.focus_handle()),
@@ -2094,6 +2204,8 @@ pub fn new(
                     browser,
                     preset_focus: std::array::from_fn(|_| cx.focus_handle()),
                     graph_focus: std::array::from_fn(|_| cx.focus_handle()),
+                    inspector_switch_focus: std::array::from_fn(|_| cx.focus_handle()),
+                    mode_focus: std::array::from_fn(|_| std::array::from_fn(|_| cx.focus_handle())),
                     press,
                     journals: std::array::from_fn(|_| RefCell::new(journal::Journal::default())),
                     editing,

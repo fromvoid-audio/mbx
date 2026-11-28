@@ -249,9 +249,7 @@ mod tests {
         let bounds = Bounds::new(point(px(19.0), px(40.0)), size(px(920.0), px(530.0)));
         let x = plot::x(bounds, view, range.edges[0]);
         assert_eq!(range.hit(bounds, view, point(x, lane_y(bounds))), Some(0));
-        assert_eq!(
-            range.hit(bounds, view, point(x, lane_y(bounds) - px(20.0))),
-            None
-        );
+        let ruler_bottom = bounds.top() + px(plot::ruler(bounds) + 5.0);
+        assert_eq!(range.hit(bounds, view, point(x, ruler_bottom)), None);
     }
 }
